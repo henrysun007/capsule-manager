@@ -24,10 +24,10 @@ lazy_static! {
     pub static ref X509NAME: HashMap<&'static str, &'static str> = {
         let mut m = HashMap::new();
         m.insert("C", "CN");
-        m.insert("ST", "HZ");
-        m.insert("L", "HZ");
-        m.insert("O", "AntGroup");
-        m.insert("OU", "SecretFlow");
+        m.insert("ST", "BJ");
+        m.insert("L", "BJ");
+        m.insert("O", "JDGroup");
+        m.insert("OU", "AISec");
         m.insert("CN", "CapsuleManager");
         m
     };

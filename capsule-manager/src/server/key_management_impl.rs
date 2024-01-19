@@ -23,22 +23,22 @@ use capsule_manager::proto::{
     EncryptedResponse, GetDataKeysRequest, GetDataKeysResponse, GetExportDataKeyRequest,
     GetExportDataKeyResponse, RegisterCertRequest,
 };
-use capsule_manager::remote_attestation::unified_attestation_wrapper::runified_attestation_verify_auth_report;
 use capsule_manager::utils::jwt::jwa::Secret;
 use capsule_manager::utils::tool::{
     get_public_key_from_cert_chain, sha256, vec_str_to_vec_u8, verify_cert_chain,
 };
 use capsule_manager::utils::type_convert::from;
 use capsule_manager::{cm_assert, errno, proto, return_errno};
-use capsule_manager_tonic::secretflowapis::v2::sdc::{
-    UnifiedAttestationAttributes, UnifiedAttestationPolicy,
-};
 use capsule_manager_tonic::secretflowapis::v2::{Code, Status};
-use hex::encode_upper;
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use hex::encode;
+use log::{debug, warn};
+use occlum_dcap::{sgx_ql_qv_result_t, DcapQuote, IoctlVerDCAPQuoteArg};
 use prost::Message;
 
 pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
-    // NOTICE: hex must be uppercase
     let resource_request = request
         .resource_request
         .as_ref()
@@ -50,14 +50,27 @@ pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
         resource_request.encode_to_vec().as_ref(),
     ]
     .join(SEPARATOR.as_bytes());
-    let hex_report_data = encode_upper(sha256(&data));
+    let hex_report_data = encode(sha256(&data));
+
+    let ua_report = if let Some(report) = &request.attestation_report {
+        report
+    } else {
+        return_errno!(ErrorCode::InternalErr, "No attestation report is found");
+    };
+
+    if ua_report.str_report_type != "JD" {
+        return_errno!(ErrorCode::InvalidArgument, "report type is not JD");
+    };
+
+    if ua_report.str_tee_platform != "SGX_DCAP" {
+        return_errno!(ErrorCode::InvalidArgument, "tee platform is not SGX_DCAP");
+    };
+
+    let quote = STANDARD.decode(ua_report.json_report.clone())?;
+    let (target_mr_enclave, target_mr_signer) = verify_in_occlum(&quote, hex_report_data.as_str())?;
 
     // get mr info
     let resource_request_innner: model::request::ResourceRequest = from(&resource_request)?;
-
-    // fill policy
-    let mut attribute1 = UnifiedAttestationAttributes::default();
-    attribute1.str_tee_platform = "SGX_DCAP".to_string();
     if let Some(env) = resource_request_innner.global_attributes.env {
         if let Some(tee) = env.tee {
             match tee {
@@ -65,40 +78,122 @@ pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
                     mr_enclave,
                     mr_signer,
                 } => {
-                    attribute1.hex_ta_measurement = mr_enclave.clone().to_uppercase();
-                    attribute1.hex_signer = mr_signer.clone().to_uppercase();
+                    if encode(&target_mr_enclave) != mr_enclave.to_lowercase() {
+                        return_errno!(
+                            ErrorCode::InvalidArgument,
+                            "mr_enclave {:x?} and {} mismatch",
+                            target_mr_enclave,
+                            mr_enclave
+                        );
+                    };
+                    if encode(&target_mr_signer) != mr_signer.to_lowercase() {
+                        return_errno!(
+                            ErrorCode::InvalidArgument,
+                            "mr_signers {:x?} and {} mismatch",
+                            target_mr_signer,
+                            mr_signer
+                        );
+                    };
                 }
                 _ => return_errno!(ErrorCode::InvalidArgument, "env tee field invalid"),
             };
         }
     }
-    attribute1.bool_debug_disabled = "1".to_string();
-    attribute1.hex_user_data = hex_report_data.clone();
-    let policy = UnifiedAttestationPolicy {
-        pem_public_key: "".to_owned(),
-        main_attributes: vec![attribute1],
-        nested_policies: vec![],
+
+    Ok(())
+}
+
+// reference
+// https://github.com/confidential-containers/kbs/blob/main/attestation-service/verifier/src/sgx/mod.rs
+pub fn verify_in_occlum(quote: &[u8], data: &str) -> AuthResult<(Vec<u8>, Vec<u8>)> {
+    if data.len() > 64 {
+        return_errno!(
+            ErrorCode::InvalidArgument,
+            "the data is too long: {}",
+            data.len()
+        );
+    }
+
+    let mut handler = DcapQuote::new()
+        .map_err(|e| errno!(ErrorCode::InternalErr, "failed to open /dev/sgx {:?}", e))?;
+    let mut result = sgx_ql_qv_result_t::default();
+    let mut collateral_expiration_status: u32 = 0;
+    let mut arg = IoctlVerDCAPQuoteArg {
+        quote_buf: quote.as_ptr(),
+        quote_size: quote.len() as u32,
+        collateral_expiration_status: &mut collateral_expiration_status,
+        quote_verification_result: &mut result,
+        supplemental_data_size: 0,
+        supplemental_data: std::ptr::null_mut(),
     };
 
-    // UAL verification
-    let str_policy = serde_json::to_string(&policy).map_err(|e| {
+    let code = handler.verify_quote(&mut arg).map_err(|e| {
         errno!(
             ErrorCode::InternalErr,
-            "report_policy {:?} to json err: {:?}",
-            &policy,
+            "failed to verify quote, error is {:?}",
             e
         )
     })?;
-    let str_report = serde_json::to_string(&request.attestation_report).map_err(|e| {
+    if code < 0 {
+        return_errno!(
+            ErrorCode::InternalErr,
+            "quote verification failed {:?}",
+            code
+        );
+    }
+
+    // check verification result
+    match result {
+        sgx_ql_qv_result_t::SGX_QL_QV_RESULT_OK => {
+            // check verification collateral expiration status
+            // this value should be considered in your own attestation/verification policy
+            if collateral_expiration_status == 0 {
+                debug!("Verification completed successfully.");
+            } else {
+                warn!("Verification completed, but collateral is out of date based on 'expiration_check_date' you provided.");
+            }
+        }
+        sgx_ql_qv_result_t::SGX_QL_QV_RESULT_CONFIG_NEEDED
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_OUT_OF_DATE
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_OUT_OF_DATE_CONFIG_NEEDED
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_SW_HARDENING_NEEDED
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_CONFIG_AND_SW_HARDENING_NEEDED => {
+            warn!(
+                "Verification completed with Non-terminal result: {:x}",
+                result as u32
+            );
+        }
+        _ => {
+            return_errno!(
+                ErrorCode::InternalErr,
+                "Verification completed with Terminal result: {:x}",
+                result as u32
+            );
+        }
+    }
+
+    let sgx_quote = verifier::sgx::parse_sgx_quote(quote).map_err(|e| {
         errno!(
             ErrorCode::InternalErr,
-            "report {:?} to json err: {:?}",
-            &request.attestation_report,
+            "failed to parse quote, error is {:?}",
             e
         )
     })?;
-    runified_attestation_verify_auth_report(str_report.as_str(), str_policy.as_str())?;
-    Ok(())
+
+    let report_data = sgx_quote.report_body.report_data;
+    if &report_data[..data.len()] != data.as_bytes() {
+        return_errno!(
+            ErrorCode::InternalErr,
+            "user data {:?} and {:?} mismatch",
+            report_data,
+            data
+        );
+    }
+
+    Ok((
+        sgx_quote.report_body.mr_enclave.to_vec(),
+        sgx_quote.report_body.mr_signer.to_vec(),
+    ))
 }
 
 impl CapsuleManagerImpl {
@@ -306,8 +401,6 @@ impl CapsuleManagerImpl {
     ) -> AuthResult<EncryptedResponse> {
         let (request_content, _) =
             super::get_request::<CreateResultDataKeyRequest>(&self.kek_pri, encrypt_request)?;
-        // 1. verify RA
-        // NOTICE: hex must be uppercase
         let body = request_content
             .body
             .as_ref()
@@ -315,38 +408,23 @@ impl CapsuleManagerImpl {
 
         //  UAL verification
         if self.mode == "production" {
-            let hex_report_data = encode_upper(sha256(body.encode_to_vec().as_slice()));
-            // fill policy
-            let mut attribute1 = UnifiedAttestationAttributes::default();
-            attribute1.str_tee_platform = "SGX_DCAP".to_string();
-            attribute1.bool_debug_disabled = "1".to_string();
-            attribute1.hex_user_data = hex_report_data.clone();
-
-            let policy = UnifiedAttestationPolicy {
-                pem_public_key: "".to_owned(),
-                main_attributes: vec![attribute1],
-                nested_policies: vec![],
+            let ua_report = if let Some(report) = &request_content.attestation_report {
+                report
+            } else {
+                return_errno!(ErrorCode::InternalErr, "No attestation report is found");
             };
 
-            // UAL verification
-            let str_policy = serde_json::to_string(&policy).map_err(|e| {
-                errno!(
-                    ErrorCode::InternalErr,
-                    "report_policy {:?} to json err: {:?}",
-                    &policy,
-                    e
-                )
-            })?;
-            let str_report =
-                serde_json::to_string(&request_content.attestation_report).map_err(|e| {
-                    errno!(
-                        ErrorCode::InternalErr,
-                        "report {:?} to json err: {:?}",
-                        &request_content.attestation_report,
-                        e
-                    )
-                })?;
-            runified_attestation_verify_auth_report(str_report.as_str(), str_policy.as_str())?;
+            if ua_report.str_report_type != "JD" {
+                return_errno!(ErrorCode::InvalidArgument, "report type is not JD");
+            };
+
+            if ua_report.str_tee_platform != "SGX_DCAP" {
+                return_errno!(ErrorCode::InvalidArgument, "tee platform is not SGX_DCAP");
+            };
+
+            let quote = STANDARD.decode(ua_report.json_report.clone())?;
+            let hex_report_data = encode(sha256(body.encode_to_vec().as_slice()));
+            let _ = verify_in_occlum(&quote, hex_report_data.as_str())?;
         }
 
         self.storage_engine

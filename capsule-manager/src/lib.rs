@@ -14,7 +14,6 @@
 
 pub mod core;
 pub mod error;
-pub mod remote_attestation;
 pub mod storage;
 pub mod utils;
 

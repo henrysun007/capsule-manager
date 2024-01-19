@@ -372,7 +372,7 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{
-        Environment, GlobalAttributes, ResourceRequest, SingleResourceRequest, TeeIdentity
+        Environment, GlobalAttributes, ResourceRequest, SingleResourceRequest, TeeIdentity,
     };
 
     #[test]
