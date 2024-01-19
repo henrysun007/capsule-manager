@@ -45,7 +45,6 @@ cp ../deployment/conf/Occlum_sgx2.json Occlum.json
 cp ../deployment/conf/config.yaml config.yaml
 mkdir -p image/etc/kubetee/
 cp ../deployment/conf/unified_attestation.json image/etc/kubetee/unified_attestation.json
-cp ../second_party/remote-attestation/c/lib/* image/lib/
 cp /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 image/lib/
 cp /usr/lib/x86_64-linux-gnu/libssl.so.1.1 image/lib/
 cp ../deployment/bin/gen_mrenclave.sh gen_mrenclave.sh

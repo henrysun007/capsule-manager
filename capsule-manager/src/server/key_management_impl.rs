@@ -34,10 +34,15 @@ use capsule_manager_tonic::secretflowapis::v2::sdc::{
     UnifiedAttestationAttributes, UnifiedAttestationPolicy,
 };
 use capsule_manager_tonic::secretflowapis::v2::{Code, Status};
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use hex::encode_upper;
 use prost::Message;
+use serde_json::json;
+use verifier::{to_verifier, InitDataHash, ReportData};
 
-pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
+pub async fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
     // NOTICE: hex must be uppercase
     let resource_request = request
         .resource_request
@@ -52,12 +57,40 @@ pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
     .join(SEPARATOR.as_bytes());
     let hex_report_data = encode_upper(sha256(&data));
 
+    let ua_report = if let Some(report) = &request.attestation_report {
+        report
+    } else {
+        return_errno!(ErrorCode::InternalErr, "No attestation report is found");
+    };
+
+    if ua_report.str_report_type != "JD" {
+        return_errno!(ErrorCode::InvalidArgument, "report type is not JD");
+    };
+
+    if ua_report.str_tee_platform != "SGX_DCAP" {
+        return_errno!(ErrorCode::InvalidArgument, "tee platform is not SGX_DCAP");
+    };
+
+    let evidence = json!({"quote": ua_report.json_report});
+
+    let coco_verifier = to_verifier(&kbs_types::Tee::Sgx).map_err(|e| {
+        errno!(
+            ErrorCode::InternalErr,
+            "failed to get the sgx verifier: {:?}",
+            e
+        )
+    })?;
+    let claims = coco_verifier
+        .evaluate(
+            &serde_json::to_vec(&evidence)?,
+            &ReportData::Value(hex_report_data.as_bytes()),
+            &InitDataHash::NotProvided,
+        )
+        .await
+        .map_err(|e| errno!(ErrorCode::InternalErr, "quote verification failed: {:?}", e))?;
+
     // get mr info
     let resource_request_innner: model::request::ResourceRequest = from(&resource_request)?;
-
-    // fill policy
-    let mut attribute1 = UnifiedAttestationAttributes::default();
-    attribute1.str_tee_platform = "SGX_DCAP".to_string();
     if let Some(env) = resource_request_innner.global_attributes.env {
         if let Some(tee) = env.tee {
             match tee {
@@ -65,39 +98,18 @@ pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
                     mr_enclave,
                     mr_signer,
                 } => {
-                    attribute1.hex_ta_measurement = mr_enclave.clone().to_uppercase();
-                    attribute1.hex_signer = mr_signer.clone().to_uppercase();
+                    if claims["mr_enclave"] != mr_enclave {
+                        return_errno!(ErrorCode::InvalidArgument, "mr_enclaves mismatch");
+                    };
+                    if claims["mr_signer"] != mr_signer {
+                        return_errno!(ErrorCode::InvalidArgument, "mr_signers mismatch");
+                    };
                 }
                 _ => return_errno!(ErrorCode::InvalidArgument, "env tee field invalid"),
             };
         }
     }
-    attribute1.bool_debug_disabled = "1".to_string();
-    attribute1.hex_user_data = hex_report_data.clone();
-    let policy = UnifiedAttestationPolicy {
-        pem_public_key: "".to_owned(),
-        main_attributes: vec![attribute1],
-        nested_policies: vec![],
-    };
 
-    // UAL verification
-    let str_policy = serde_json::to_string(&policy).map_err(|e| {
-        errno!(
-            ErrorCode::InternalErr,
-            "report_policy {:?} to json err: {:?}",
-            &policy,
-            e
-        )
-    })?;
-    let str_report = serde_json::to_string(&request.attestation_report).map_err(|e| {
-        errno!(
-            ErrorCode::InternalErr,
-            "report {:?} to json err: {:?}",
-            &request.attestation_report,
-            e
-        )
-    })?;
-    runified_attestation_verify_auth_report(str_report.as_str(), str_policy.as_str())?;
     Ok(())
 }
 
@@ -110,7 +122,7 @@ impl CapsuleManagerImpl {
             super::get_request::<GetDataKeysRequest>(&self.kek_pri, encrypt_request)?;
         // 1. verify RA
         if self.mode == "production" {
-            ra_verify(&request_content)?;
+            ra_verify(&request_content).await?;
         }
 
         // 2. enforce data policy
