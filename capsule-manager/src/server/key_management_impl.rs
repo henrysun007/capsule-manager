@@ -38,11 +38,13 @@ use capsule_manager_tonic::secretflowapis::v2::{Code, Status};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use hex::encode_upper;
+use log::{debug, warn};
+use occlum_dcap::{sgx_ql_qv_result_t, DcapQuote, IoctlGenDCAPQuoteArg, IoctlVerDCAPQuoteArg};
 use prost::Message;
 use serde_json::json;
-use verifier::{to_verifier, InitDataHash, ReportData};
+use verifier::{to_verifier, InitDataHash, ReportData, TeeEvidenceParsedClaim};
 
-pub async fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
+pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
     // NOTICE: hex must be uppercase
     let resource_request = request
         .resource_request
@@ -71,23 +73,8 @@ pub async fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
         return_errno!(ErrorCode::InvalidArgument, "tee platform is not SGX_DCAP");
     };
 
-    let evidence = json!({"quote": ua_report.json_report});
-
-    let coco_verifier = to_verifier(&kbs_types::Tee::Sgx).map_err(|e| {
-        errno!(
-            ErrorCode::InternalErr,
-            "failed to get the sgx verifier: {:?}",
-            e
-        )
-    })?;
-    let claims = coco_verifier
-        .evaluate(
-            &serde_json::to_vec(&evidence)?,
-            &ReportData::Value(hex_report_data.as_bytes()),
-            &InitDataHash::NotProvided,
-        )
-        .await
-        .map_err(|e| errno!(ErrorCode::InternalErr, "quote verification failed: {:?}", e))?;
+    let quote = STANDARD.decode(ua_report.json_report.clone())?;
+    let (target_mr_enclave, target_mr_signer) = verify_in_occlum(&quote)?;
 
     // get mr info
     let resource_request_innner: model::request::ResourceRequest = from(&resource_request)?;
@@ -98,11 +85,21 @@ pub async fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
                     mr_enclave,
                     mr_signer,
                 } => {
-                    if claims["mr_enclave"] != mr_enclave {
-                        return_errno!(ErrorCode::InvalidArgument, "mr_enclaves mismatch");
+                    if hex::encode(&target_mr_enclave) != mr_enclave {
+                        return_errno!(
+                            ErrorCode::InvalidArgument,
+                            "mr_enclave {:x?} and {} mismatch",
+                            target_mr_enclave,
+                            mr_enclave
+                        );
                     };
-                    if claims["mr_signer"] != mr_signer {
-                        return_errno!(ErrorCode::InvalidArgument, "mr_signers mismatch");
+                    if hex::encode(&target_mr_signer) != mr_signer {
+                        return_errno!(
+                            ErrorCode::InvalidArgument,
+                            "mr_signers {:x?} and {} mismatch",
+                            target_mr_signer,
+                            mr_signer
+                        );
                     };
                 }
                 _ => return_errno!(ErrorCode::InvalidArgument, "env tee field invalid"),
@@ -111,6 +108,80 @@ pub async fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
     }
 
     Ok(())
+}
+
+// reference
+// https://github.com/confidential-containers/kbs/blob/main/attestation-service/verifier/src/sgx/mod.rs
+pub fn verify_in_occlum(quote: &[u8]) -> AuthResult<(Vec<u8>, Vec<u8>)> {
+    let mut handler = DcapQuote::new()
+        .map_err(|e| errno!(ErrorCode::InternalErr, "failed to open /dev/sgx {:?}", e))?;
+    let mut result = sgx_ql_qv_result_t::default();
+    let mut collateral_expiration_status: u32 = 0;
+    let mut arg = IoctlVerDCAPQuoteArg {
+        quote_buf: quote.as_ptr(),
+        quote_size: quote.len() as u32,
+        collateral_expiration_status: &mut collateral_expiration_status,
+        quote_verification_result: &mut result,
+        supplemental_data_size: 0,
+        supplemental_data: std::ptr::null_mut(),
+    };
+
+    let code = handler.verify_quote(&mut arg).map_err(|e| {
+        errno!(
+            ErrorCode::InternalErr,
+            "failed to verify quote, error is {:?}",
+            e
+        )
+    })?;
+    if code < 0 {
+        return_errno!(
+            ErrorCode::InternalErr,
+            "quote verification failed {:?}",
+            code
+        );
+    }
+
+    // check verification result
+    match result {
+        sgx_ql_qv_result_t::SGX_QL_QV_RESULT_OK => {
+            // check verification collateral expiration status
+            // this value should be considered in your own attestation/verification policy
+            if collateral_expiration_status == 0 {
+                debug!("Verification completed successfully.");
+            } else {
+                warn!("Verification completed, but collateral is out of date based on 'expiration_check_date' you provided.");
+            }
+        }
+        sgx_ql_qv_result_t::SGX_QL_QV_RESULT_CONFIG_NEEDED
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_OUT_OF_DATE
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_OUT_OF_DATE_CONFIG_NEEDED
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_SW_HARDENING_NEEDED
+        | sgx_ql_qv_result_t::SGX_QL_QV_RESULT_CONFIG_AND_SW_HARDENING_NEEDED => {
+            warn!(
+                "Verification completed with Non-terminal result: {:x}",
+                result as u32
+            );
+        }
+        _ => {
+            return_errno!(
+                ErrorCode::InternalErr,
+                "Verification completed with Terminal result: {:x}",
+                result as u32
+            );
+        }
+    }
+
+    let sgx_quote = verifier::sgx::parse_sgx_quote(quote).map_err(|e| {
+        errno!(
+            ErrorCode::InternalErr,
+            "failed to parse quote, error is {:?}",
+            e
+        )
+    })?;
+    Ok((
+        sgx_quote.report_body.mr_enclave.to_vec(),
+        sgx_quote.report_body.mr_signer.to_vec(),
+    ))
 }
 
 impl CapsuleManagerImpl {
@@ -122,7 +193,7 @@ impl CapsuleManagerImpl {
             super::get_request::<GetDataKeysRequest>(&self.kek_pri, encrypt_request)?;
         // 1. verify RA
         if self.mode == "production" {
-            ra_verify(&request_content).await?;
+            ra_verify(&request_content)?;
         }
 
         // 2. enforce data policy
