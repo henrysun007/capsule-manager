@@ -23,7 +23,6 @@ use capsule_manager::proto::{
     EncryptedResponse, GetDataKeysRequest, GetDataKeysResponse, GetExportDataKeyRequest,
     GetExportDataKeyResponse, RegisterCertRequest,
 };
-use capsule_manager::remote_attestation::unified_attestation_wrapper::runified_attestation_verify_auth_report;
 use capsule_manager::utils::jwt::jwa::Secret;
 use capsule_manager::utils::tool::{
     get_public_key_from_cert_chain, sha256, vec_str_to_vec_u8, verify_cert_chain,
