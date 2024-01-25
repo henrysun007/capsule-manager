@@ -44,8 +44,6 @@ base32 = "0.4.0"
 lazy_static = "1.4.0"
 uuid = { version = "1.4.1", feaures = ["v4", "fast-rng", "macro-diagnostics"] }
 verifier = { git = "https://github.com/confidential-containers/kbs.git", default-features = false, features = ["sgx-verifier"]  }
-kbs-types = "0.5"
-attester = { git = "https://github.com/confidential-containers/guest-components.git", default-features = false, features = ["sgx-attester"] }
 occlum_dcap = { git = "https://github.com/occlum/occlum", tag = "v0.29.7" }
 
 [dev-dependencies]
