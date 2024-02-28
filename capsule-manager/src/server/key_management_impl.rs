@@ -95,7 +95,6 @@ pub fn ra_verify(request: &GetDataKeysRequest) -> AuthResult<()> {
                         );
                     };
                 }
-                _ => return_errno!(ErrorCode::InvalidArgument, "env tee field invalid"),
             };
         }
     }

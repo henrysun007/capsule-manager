@@ -121,6 +121,7 @@ pub struct CapsuleManagerImpl {
     // root private key
     kek_pri: Vec<u8>,
     // public-private key algorithm: SM2/RSA
+    #[allow(dead_code)]
     scheme: AsymmetricScheme,
     // data storage client
     storage_engine: std::sync::Arc<dyn StorageEngine>,

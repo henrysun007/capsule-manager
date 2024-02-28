@@ -17,6 +17,8 @@
 //! In general, users should not need to invoke these manually. These are
 //! exposed for potential use in your applications, should you wish to make
 //! extensions to the implementations provided.
+
+#![allow(dead_code)]
 pub(crate) mod byte_sequence;
 pub(crate) mod format_string;
 pub(crate) mod jwe_header;

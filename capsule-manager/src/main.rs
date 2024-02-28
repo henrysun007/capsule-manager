@@ -23,7 +23,7 @@ use capsule_manager_tonic::secretflowapis::v2::sdc::capsule_manager::capsule_man
 use config::config::Config;
 use log::info;
 use std::fs;
-use std::str::{from_utf8, FromStr};
+use std::str::FromStr;
 use tonic::transport::Server;
 
 #[tokio::main(worker_threads = 16)]
