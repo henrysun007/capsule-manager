@@ -47,6 +47,7 @@ mkdir -p image/etc/kubetee/
 cp ../deployment/conf/unified_attestation.json image/etc/kubetee/unified_attestation.json
 cp /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 image/lib/
 cp /usr/lib/x86_64-linux-gnu/libssl.so.1.1 image/lib/
+cp /usr/lib/x86_64-linux-gnu/libsgx_dcap_quoteverify.so.1 image/lib/
 cp ../deployment/bin/gen_mrenclave.sh gen_mrenclave.sh
 if [ ! -d "../capsule-manager/resources" ]; then
     mkdir ../capsule-manager/resources
