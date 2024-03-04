@@ -16,6 +16,7 @@ pub mod config;
 pub mod server;
 
 use capsule_manager::storage::in_memory_storage::InMemoryStorage;
+use capsule_manager::storage::local_fs_storage::LocalFsStorage;
 use capsule_manager::storage::storage_engine::StorageEngine;
 use capsule_manager::utils;
 use capsule_manager::utils::scheme::AsymmetricScheme;
@@ -44,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage_engine: std::sync::Arc<dyn StorageEngine> =
         match cfg.storage_backend.as_ref().unwrap().as_str() {
             "inmemory" => std::sync::Arc::new(InMemoryStorage::new()),
+            "localfs" => std::sync::Arc::new(LocalFsStorage::default()),
             _ => panic!("unsupport storage engine"),
         };
 

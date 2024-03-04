@@ -45,6 +45,7 @@ lazy_static = "1.4.0"
 uuid = { version = "1.4.1", feaures = ["v4", "fast-rng", "macro-diagnostics"] }
 verifier = { git = "https://github.com/confidential-containers/kbs.git", default-features = false, features = ["sgx-verifier"]  }
 occlum_dcap = { git = "https://github.com/occlum/occlum", tag = "v0.29.7" }
+sled = "0.34.7"
 
 [dev-dependencies]
 serde_test = "1.0"

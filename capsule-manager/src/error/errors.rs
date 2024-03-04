@@ -150,6 +150,16 @@ impl From<Utf8Error> for Error {
     }
 }
 
+impl From<sled::Error> for Error {
+    fn from(e: sled::Error) -> Self {
+        Error {
+            code: ErrorCode::InternalErr,
+            details: Some(Box::new(e.to_string())),
+            location: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ErrorLocation {
     line: u32,
