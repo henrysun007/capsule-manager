@@ -50,6 +50,12 @@ pub enum Operator {
 
     #[serde(rename = "OP_PREDICTION_BIAS_EVALUATION")]
     PredictionBiasEvaluation,
+
+    #[serde(rename = "OP_SQL")]
+    Sql,
+
+    #[serde(rename = "OP_PYTHON")]
+    Python,
 }
 
 impl fmt::Debug for Operator {
@@ -69,6 +75,8 @@ impl fmt::Debug for Operator {
             Operator::BiclassifierEvaluation => write!(f, "OP_BICLASSIFIER_EVALUATION"),
             Operator::Predict => write!(f, "OP_PREDICT"),
             Operator::PredictionBiasEvaluation => write!(f, "OP_PREDICTION_BIAS_EVALUATION"),
+            Operator::Sql => write!(f, "OP_SQL"),
+            Operator::Python => write!(f, "OP_PYTHON"),
         }
     }
 }
@@ -92,6 +100,8 @@ impl FromStr for Operator {
             "OP_BICLASSIFIER_EVALUATION" => Ok(Operator::BiclassifierEvaluation),
             "OP_PREDICT" => Ok(Operator::Predict),
             "OP_PREDICTION_BIAS_EVALUATION" => Ok(Operator::PredictionBiasEvaluation),
+            "OP_SQL" => Ok(Operator::Sql),
+            "OP_PYTHON" => Ok(Operator::Python),
             _ => Err(()),
         }
     }
